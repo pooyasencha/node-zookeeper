@@ -259,8 +259,13 @@ public:
 #endif
         ev_tstamp timeout = zk->last_activity + zk->tv.tv_sec + zk->tv.tv_usec/1000000.;
 
+#if NODE_VERSION_AT_LEAST(0, 8, 0)
+        // node 0.8's ev-emul.h doesn't handle setting timers again correctly
+        if (true) {
+#else
         // if last_activity + tv.tv_sec is older than now, we did time out
         if (timeout < now) {
+#endif
             LOG_DEBUG(("ping timer went off"));
             // timeout occurred, take action
             zk->yield ();
