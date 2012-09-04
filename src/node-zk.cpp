@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <string>
 #include <string.h>
 #include <strings.h>
 #include <stdarg.h>
@@ -47,6 +48,8 @@ DEFINE_STRING (on_event_deleted,     "deleted");
 DEFINE_STRING (on_event_changed,     "changed");
 DEFINE_STRING (on_event_child,       "child");
 DEFINE_STRING (on_event_notwatching, "notwatching");
+
+DEFINE_STRING (on_log,               "log");
 
 DEFINE_SYMBOL (HIDDEN_PROP_ZK);
 DEFINE_SYMBOL (HIDDEN_PROP_HANDBACK);
@@ -306,7 +309,7 @@ public:
 
     static void zk_uv_cb (uv_poll_t* handle, int status, int revents) {
 
-        LOG_DEBUG(("zk_io_cb fired"));
+        LOG_DEBUG(("zk_uv_cb fired"));
         ZooKeeper *zk = static_cast<ZooKeeper*>(handle->data);
 	zk->stopPollAndTimer();
         int events = (revents & UV_READABLE ? ZOOKEEPER_READ : 0) |
@@ -316,6 +319,49 @@ public:
             LOG_ERROR(("yield:zookeeper_process returned error: %d - %s\n", rc, zerror(rc)));
         }
         zk->yield();
+    }
+
+    static void zk_log_cb (uv_poll_t* handle, int status, int revents) {
+        ZooKeeper *zk = static_cast<ZooKeeper*>(handle->data);
+        zk->yield_log();
+    }
+
+    void yield_log() {
+        if (log_pipe[0]==-1) {
+            zoo_set_log_stream(NULL);
+            close(log_pipe[0]);
+            close(log_pipe[1]);
+            return;
+        }
+        static std::string buffer = "";
+        std::string line;
+        std::string::iterator pos;
+        while ((pos = find(buffer.begin(), buffer.end(), '\n')) == buffer.end ()) {
+            char read_buf[2048];
+            int n = read (log_pipe[0], read_buf, sizeof(read_buf)-1);
+            if (n == -1 && errno == EAGAIN) {
+                // no data
+                return;
+            } else if (n == -1) {
+                // handle errors
+                zoo_set_log_stream(NULL);
+                close(log_pipe[0]);
+                close(log_pipe[1]);
+                LOG_ERROR(("Can't read logs %s\n", strerror(errno)));
+                line = buffer;
+                SendLog(line.c_str());
+                buffer = "";
+                return;
+            }
+            read_buf[n] = 0;
+            buffer += read_buf;
+        }
+
+        while ((pos = find(buffer.begin(), buffer.end(), '\n')) != buffer.end ()) {
+            line = std::string (buffer.begin(), pos);
+            buffer = std::string (pos + 1, buffer.end());
+            SendLog(line.c_str());
+        }
     }
 
     static void zk_timer_cb (uv_timer_t *handle, int status) {
@@ -346,10 +392,10 @@ public:
 
         int32_t debug_level = arg->Get(String::NewSymbol("debug_level"))->ToInt32()->Value();
         zoo_set_debug_level (static_cast<ZooLogLevel>(debug_level));
+
         bool order = arg->Get(String::NewSymbol("host_order_deterministic"))->ToBoolean()->BooleanValue();
-
-
         zoo_deterministic_conn_order (order); // enable deterministic order
+
         String::AsciiValue _hostPort (arg->Get(String::NewSymbol("connect"))->ToString());
         int32_t session_timeout = arg->Get(String::NewSymbol("timeout"))->ToInt32()->Value();
         if (session_timeout == 0) session_timeout = 20000;
@@ -375,6 +421,24 @@ public:
 
         ZooKeeper *zk = ObjectWrap::Unwrap<ZooKeeper>(args.This());
         assert(zk);
+
+        bool emit_log = arg->Get(String::NewSymbol("emit_log"))->ToBoolean()->BooleanValue();
+        if (emit_log) {
+            pipe(zk->log_pipe);
+            FILE *logStream = fdopen (zk->log_pipe[1], "w");
+            if (logStream == 0) {
+                zoo_set_log_stream(NULL);
+                LOG_ERROR(("Failed to set log stream"));
+            } else {
+                fcntl(zk->log_pipe[0], F_SETFL, O_NONBLOCK);
+                uv_poll_init(uv_default_loop(), &zk->zk_uvlog_handle, zk->log_pipe[0]);
+                zk->zk_uvlog_handle.data = zk;
+                uv_poll_start(&zk->zk_uvlog_handle, UV_READABLE, zk_log_cb);
+                zoo_set_log_stream(logStream);
+            }
+        } else {
+            zk->log_pipe[0] = zk->log_pipe[1] = -1;
+        }
 
         if (!zk->realInit(*_hostPort, session_timeout, &local_client))
             return ErrnoException(errno, "zookeeper_init", "failed to init", __FILE__);
@@ -450,6 +514,22 @@ public:
         for (int i = 0; i < ZOOKEEPER_PASSWORD_BYTE_COUNT; ++i) {
 	    hexToUchar(hex, (unsigned char *)p+i);
 	    hex += 2;
+        }
+    }
+
+    void SendLog (const char* str) {
+        HandleScope scope;
+        Local<Value> argv[2];
+        argv[0] = Local<Value>::New(on_log);
+        argv[1] = String::New(str);
+        Local<Value> emit_v = handle_->Get(String::NewSymbol("emit"));
+        assert(emit_v->IsFunction());
+        Local<Function> emit_fn = emit_v.As<Function>();
+
+        TryCatch tc;
+        emit_fn->Call(handle_, 2, argv);
+        if(tc.HasCaught()) {
+	    FatalException(tc);
         }
     }
 
@@ -799,6 +879,22 @@ public:
         }
         LOG_DEBUG(("zookeeper_close() returned"));
         DoEmit (on_closed);
+
+        if (log_pipe[0]>=0) {
+            // flush logs
+            yield_log();
+            // stop handler
+            if (uv_is_active((const uv_handle_t *)&zk_uvlog_handle))
+                uv_poll_stop(&zk_uvlog_handle);
+            // close fd
+            close(log_pipe[0]);
+            log_pipe[0] = -1;
+        }
+        if (log_pipe[1]>=0) {
+            close(log_pipe[1]);
+            log_pipe[1] = -1;
+        }
+        
         Unref();
     }
 
@@ -819,7 +915,10 @@ public:
         ZERO_MEM (myid);
         ZERO_MEM (zk_uvp_handle);
         ZERO_MEM (zk_uvt_timer);
+        ZERO_MEM (zk_uvlog_handle);
         is_closed = false;
+        log_pipe[0] = -1;
+        log_pipe[0] = -1;
     }
 private:
     zhandle_t *zhandle;
@@ -828,6 +927,8 @@ private:
     uv_poll_t zk_uvp_handle;
     uv_timer_t zk_uvt_timer;
     bool is_closed;
+    uv_poll_t zk_uvlog_handle;
+    int log_pipe[2];
 };
 
 extern "C" void init(Handle<Object> target) {
