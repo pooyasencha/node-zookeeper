@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <string>
+#include <algorithm>
 #include <string.h>
 #include <strings.h>
 #include <stdarg.h>
