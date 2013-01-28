@@ -8,6 +8,22 @@ ZK=zookeeper-3.4.3
 ZK_FILE=/$BUILD_TMP/$ZK.tar.gz
 ZK_URL=http://apache.mirrors.tds.net/zookeeper/$ZK/$ZK.tar.gz
 
+# Mac specific optimization
+if [ -e /usr/local/lib/libzookeeper_st.a -a  -e /usr/local/include/c-client-src/zookeeper.h ]; then
+    mkdir -p $BUILD/include
+    ln -s -fn /usr/local/lib $BUILD/lib
+    ln -s -fn /usr/local/include/c-client-src/ $BUILD/include/zookeeper
+    exit 0;
+fi
+
+# Sencha specific optimization
+if [ -e /opt/srv/zookeeper/lib/libzookeeper_st.a -a  -e /opt/srv/zookeeper/include/zookeeper/zookeeper.h ]; then
+    mkdir -p $BUILD/include
+    ln -s -fn /opt/srv/zookeeper/lib $BUILD/lib
+    ln -s -fn /opt/srv/zookeeper/include/zookeeper $BUILD/include/zookeeper
+    exit 0;
+fi
+
 if [ "$PLATFORM" != "SunOS" ]; then
     mkdir -p $BUILD_TMP
     if [ ! -e "$ZK_FILE" ] ; then
