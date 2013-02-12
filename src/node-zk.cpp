@@ -302,6 +302,7 @@ public:
 	    LOG_ERROR(("yield:zookeeper_interest returned error: %d - %s\n",
 		       rc,
 		       zerror(rc)));
+	    realClose();
 	    return;
         }
 
