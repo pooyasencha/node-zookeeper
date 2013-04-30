@@ -9,6 +9,8 @@
 #include <node_buffer.h>
 #include <uv.h>
 #include <v8.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 
 using namespace v8;
@@ -426,7 +428,7 @@ public:
 
         bool emit_log = arg->Get(String::NewSymbol("emit_log"))->ToBoolean()->BooleanValue();
         if (emit_log) {
-            pipe(zk->log_pipe);
+            THROW_IF_NOT ( pipe(zk->log_pipe) != -1, "Failed to create a pipe for logging" );
             FILE *logStream = fdopen (zk->log_pipe[1], "w");
             if (logStream == 0) {
                 zoo_set_log_stream(NULL);
